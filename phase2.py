@@ -1,4 +1,10 @@
 # Phase1 Imports
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.indexes import VectorstoreIndexCreator
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import HuggingFaceBgeEmbeddings
 import streamlit as st
 
 # Phase2 Imports
@@ -8,6 +14,8 @@ from langchain_groq import ChatGroq
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 load_dotenv()
+
+# Phase3 Imports
 
 st.set_page_config(page_title="RAG Chatbot", layout="centered")
 
@@ -61,6 +69,20 @@ for msg in st.session_state.messages:
         st.markdown(
             f"<div class='chat-container'><div class='chat-bubble-assistant'>{msg['content']}</div></div>", unsafe_allow_html=True)
 
+
+@st.cache_resource
+def get_vectorstore():
+    pdf_name = "./DSA pat.pdf" #Enter your pdf
+    loaders = [PyPDFLoader(pdf_name)]
+    # Creatr Chunks
+    index = VectorstoreIndexCreator(
+        embedding=HuggingFaceBgeEmbeddings(model_name='all-MiniLM-L12-v2'),
+        text_splitter=RecursiveCharacterTextSplitter(
+            chunk_size=1000, chunk_overlap=100)
+    ).from_loaders(loaders)
+    return index.vectorstore
+
+
 # Input box
 if user_input := st.chat_input("Type your message..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
@@ -68,10 +90,19 @@ if user_input := st.chat_input("Type your message..."):
         f"<div class='chat-container'><div class='chat-bubble-user'>{user_input}</div></div>", unsafe_allow_html=True)
 
     # Giving Prompt
-    system_prompt = ChatPromptTemplate.from_template("""You are an expert AI bot who knows everthing and can chat like chatgpt
-                                              Answer the following question:{user_prompt}.
-                                              Start answers directly. No small talk please.
-                                              """)
+    system_prompt = ChatPromptTemplate.from_template("""
+    You are a PDF QA assistant. 
+    You must ONLY use the provided context to answer. 
+    If the answer is not in the context, reply: "I don’t know."
+    Do not use outside knowledge. 
+    Keep answers short and factual.
+
+    Context:
+    {context}
+
+    Question: {input}
+    """)
+
 
     # Initializing Model and API Key
     model = "openai/gpt-oss-120b"
@@ -81,14 +112,30 @@ if user_input := st.chat_input("Type your message..."):
         model=model
     )
 
-    # Initializing Parser for text output
-    parser = StrOutputParser()
+    try:
+        vectorstore = get_vectorstore()
+        if vectorstore is None:
+            st.error("Failed to load the document")
 
-    chain = system_prompt | groq_chat | parser
+        #response = result["result"]
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-    response = chain.invoke({"user_prompt": user_input})
+        # Use the system prompt you already defined
+        doc_chain = create_stuff_documents_chain(groq_chat, system_prompt)
+
+        # Connect retriever with LLM chain
+        chain = create_retrieval_chain(retriever, doc_chain)
+
+        # Run the chain
+        result = chain.invoke({"input": user_input})
+        response = result["answer"]
+        
+        
     # response = "I am your assistant"
-    st.session_state.messages.append(
-        {"role": "assistant", "content": response})
-    st.markdown(
-        f"<div class='chat-container'><div class='chat-bubble-assistant'>{response}</div></div>", unsafe_allow_html=True)
+        st.session_state.messages.append(
+            {"role": "assistant", "content": response})
+        st.markdown(
+            f"<div class='chat-container'><div class='chat-bubble-assistant'>{response}</div></div>", unsafe_allow_html=True)
+    
+    except Exception as e:
+        st.error(f"Error: [{str(e)}]")
